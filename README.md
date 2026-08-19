@@ -129,4 +129,4 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 swift test
 ```
 
-当前共有 54 项测试，覆盖光强滞回、无效驱动哨兵、睡眠唤醒预热、JSONC 保格式迁移、Ghostty include、CAS 冲突、显式安装授权、跨应用事务回滚、磁盘事务日志、扩展属性保持和崩溃恢复。Ghostty 测试会在系统临时目录中调用已安装的 `+validate-config`，不会读写真实用户配置。
+当前共有 55 项测试，覆盖光强滞回、无效驱动哨兵、睡眠唤醒预热、JSONC 保格式迁移、Ghostty include、CAS 冲突、显式安装授权、跨应用事务回滚、磁盘事务日志、扩展属性保持和崩溃恢复。Ghostty 测试会在系统临时目录中调用已安装的 `+validate-config`，不会读写真实用户配置。

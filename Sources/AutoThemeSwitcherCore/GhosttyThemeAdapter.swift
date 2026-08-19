@@ -205,6 +205,7 @@ private extension URL {
 public enum GhosttyReloadResult: Equatable, Sendable {
     case reloaded
     case notRunning
+    case noTerminal
     case pending(String)
 
     fileprivate var receiptMetadata: [String: String] {
@@ -213,6 +214,8 @@ public enum GhosttyReloadResult: Equatable, Sendable {
             ["reload": "reloaded", "pendingReload": "false"]
         case .notRunning:
             ["reload": "notRunning", "pendingReload": "false"]
+        case .noTerminal:
+            ["reload": "noTerminal", "pendingReload": "false"]
         case let .pending(message):
             ["reload": message, "pendingReload": "true"]
         }
@@ -275,7 +278,9 @@ public struct AppleScriptGhosttyReloader: GhosttyReloading {
         case "not-running":
             return .notRunning
         case "no-terminal":
-            return .pending("Ghostty 正在运行，但没有可用于重新加载配置的终端窗口")
+            // 没有终端窗口时，当前没有需要热重载的实例；下次打开窗口会直接
+            // 读取已切换的配置，因此不应该把这种状态报告为待处理错误。
+            return .noTerminal
         default:
             return .pending("Ghostty 拒绝执行 reload_config")
         }

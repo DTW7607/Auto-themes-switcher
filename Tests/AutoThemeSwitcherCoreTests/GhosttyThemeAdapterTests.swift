@@ -143,6 +143,21 @@ final class GhosttyThemeAdapterTests: XCTestCase {
         XCTAssertEqual(reloader.reloadCount, 1)
     }
 
+    func testNoTerminalDoesNotMarkCommittedConfigurationAsPendingReload() throws {
+        let fileSystem = GhosttyMemoryFileSystem([mainURL: Data("font-size = 13\n".utf8)])
+        let reloader = StubGhosttyReloader(result: .noTerminal)
+        let adapter = makeAdapter(fileSystem, reloader: reloader)
+        let change = try adapter.prepare(targetMode: .light, from: adapter.inspect())
+
+        let receipt = try adapter.commit(change)
+        try adapter.verify(receipt)
+
+        XCTAssertEqual(receipt.metadata["pendingReload"], "false")
+        XCTAssertEqual(receipt.metadata["reload"], "noTerminal")
+        XCTAssertEqual(try adapter.inspect().detectedMode, .light)
+        XCTAssertEqual(reloader.reloadCount, 1)
+    }
+
     func testUnchangedValidatedLightDependencyIsRecheckedBeforeModeWrite() throws {
         let fileSystem = GhosttyMemoryFileSystem([mainURL: Data("font-size = 13\n".utf8)])
         let adapter = makeAdapter(fileSystem)
