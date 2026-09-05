@@ -39,9 +39,10 @@ CODE_SIGN_IDENTITY="Developer ID Application: ..." ./Scripts/package_app.sh
 
 1. 启动 App，确认菜单栏能显示实时 lux。
 2. 点击“安装或修复集成”。
-3. 首次切换 Ghostty 时，macOS 会询问是否允许 Auto Theme Switcher 控制 Ghostty。该权限只用于执行 `reload_config`，不会读取或发送终端内容。
-4. 如果拒绝 Automation 权限，配置文件仍会安全更新；在 Ghostty 中手动按 `⌘⇧,` 即可重新加载。
-5. “登录时启动”首次注册后若显示需要批准，请到“系统设置 → 通用 → 登录项与扩展”允许该 App。
+3. 首次切换 Ghostty 时，macOS 会询问是否允许 Auto Theme Switcher 控制 Ghostty。该权限只用于检查 terminal 并执行 `reload_config`，不会读取或发送终端内容。
+4. 有终端窗口时，App 通过 Ghostty AppleScript 对第一个 terminal 执行 `reload_config`。如果 Ghostty 进程仍在运行但没有终端窗口，App 会按 bundle id 精确定位已经完成启动且仍存活的 Ghostty 主进程，并向该 PID 发送 `SIGUSR2` 请求异步重载；`.reloadRequested` 只表示信号已成功送达，不代表重载已经完成。
+5. Ghostty 未运行时不会启动它、创建窗口或改变焦点。若 Automation 权限被拒绝，App 不会改走 signal；配置文件仍会安全更新，请在 Ghostty 中手动按 `⌘⇧,` 重新加载。
+6. “登录时启动”首次注册后若显示需要批准，请到“系统设置 → 通用 → 登录项与扩展”允许该 App。
 
 首次集成会执行以下有限变更：
 
@@ -64,7 +65,7 @@ CODE_SIGN_IDENTITY="Developer ID Application: ..." ./Scripts/package_app.sh
 0 ≤ 室内阈值 < 室外阈值 ≤ 200000
 ```
 
-手动点击“亮色”或“暗色”会同时暂停自动模式，避免传感器立即反向覆盖。
+手动点击“亮色”或“暗色”会同时暂停自动模式，避免传感器立即反向覆盖。再次选择当前模式时，即使配置文件无需改写，App 仍会尝试重载 Ghostty。
 
 ### 现场校准建议
 
@@ -116,7 +117,7 @@ VS Code Insiders、自定义 Profile 和通过 `--user-data-dir` 启动的实例
 - 不联网、无遥测。
 - 不读取终端内容。
 - 不需要 Accessibility、输入监控、摄像头或定位权限。
-- 仅需要对当前用户的 VS Code/Ghostty 配置文件进行读写，以及向 Ghostty 发送一次受 TCC 保护的 Apple Event。
+- 仅需要对当前用户的 VS Code/Ghostty 配置文件进行读写，并向 Ghostty 发送一次受 TCC 保护的 Apple Event：有终端窗口时执行 `reload_config`，无终端窗口时先通过该 Apple Event 确认 `no-terminal`，再在 Ghostty 仍运行时向其已完成启动且仍存活的主进程发送一次定向 `SIGUSR2`。该 signal 不会启动进程、创建窗口或改变焦点。
 
 ## 开发测试
 
@@ -129,4 +130,4 @@ export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
 swift test
 ```
 
-当前共有 55 项测试，覆盖光强滞回、无效驱动哨兵、睡眠唤醒预热、JSONC 保格式迁移、Ghostty include、CAS 冲突、显式安装授权、跨应用事务回滚、磁盘事务日志、扩展属性保持和崩溃恢复。Ghostty 测试会在系统临时目录中调用已安装的 `+validate-config`，不会读写真实用户配置。
+当前共有 65 项测试，覆盖光强滞回、无效驱动哨兵、睡眠唤醒预热、JSONC 保格式迁移、Ghostty include、Ghostty 有窗口与无窗口重载、SIGUSR2 异步请求、进程退出竞态、Automation 拒绝、亮暗双向信号路径、CAS 冲突、显式安装授权、跨应用事务回滚、磁盘事务日志、扩展属性保持和崩溃恢复。Ghostty 测试会在系统临时目录中调用已安装的 `+validate-config`，不会读写真实用户配置。

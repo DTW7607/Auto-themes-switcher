@@ -204,6 +204,9 @@ private extension URL {
 
 public enum GhosttyReloadResult: Equatable, Sendable {
     case reloaded
+    /// SIGUSR2 was accepted by a running Ghostty process. This requests an
+    /// asynchronous reload; it does not confirm that Ghostty has finished it.
+    case reloadRequested
     case notRunning
     case noTerminal
     case pending(String)
@@ -212,6 +215,8 @@ public enum GhosttyReloadResult: Equatable, Sendable {
         switch self {
         case .reloaded:
             ["reload": "reloaded", "pendingReload": "false"]
+        case .reloadRequested:
+            ["reload": "reloadRequested", "pendingReload": "false"]
         case .notRunning:
             ["reload": "notRunning", "pendingReload": "false"]
         case .noTerminal:
@@ -227,8 +232,118 @@ public protocol GhosttyReloading: Sendable {
     func reloadIfRunning() -> GhosttyReloadResult
 }
 
-public struct AppleScriptGhosttyReloader: GhosttyReloading {
+public enum GhosttyAppleScriptExecution: Equatable, Sendable {
+    case returned(String?)
+    case failed(String)
+}
+
+public protocol GhosttyAppleScriptExecuting: Sendable {
+    func execute(source: String) -> GhosttyAppleScriptExecution
+}
+
+public struct NSAppleScriptExecutor: GhosttyAppleScriptExecuting {
     public init() {}
+
+    public func execute(source: String) -> GhosttyAppleScriptExecution {
+        guard let appleScript = NSAppleScript(source: source) else {
+            return .failed("无法创建 Ghostty reload AppleScript")
+        }
+        var errorInfo: NSDictionary?
+        let result = appleScript.executeAndReturnError(&errorInfo)
+        if let errorInfo {
+            let message = errorInfo[NSAppleScript.errorMessage] as? String
+            return .failed(message ?? "请在 Ghostty 中按 ⌘⇧, 重新载入配置")
+        }
+        return .returned(result.stringValue)
+    }
+}
+
+public struct GhosttyRunningApplication: Equatable, Sendable {
+    public let processIdentifier: Int32
+    public let isFinishedLaunching: Bool
+    public let isTerminated: Bool
+
+    public init(
+        processIdentifier: Int32,
+        isFinishedLaunching: Bool = true,
+        isTerminated: Bool = false
+    ) {
+        self.processIdentifier = processIdentifier
+        self.isFinishedLaunching = isFinishedLaunching
+        self.isTerminated = isTerminated
+    }
+}
+
+public protocol GhosttyProcessQuerying: Sendable {
+    func runningGhosttyApplication() -> GhosttyRunningApplication?
+}
+
+public struct NSRunningApplicationGhosttyProcessQuery: GhosttyProcessQuerying {
+    public static let bundleIdentifier = "com.mitchellh.ghostty"
+
+    public init() {}
+
+    public func runningGhosttyApplication() -> GhosttyRunningApplication? {
+        NSRunningApplication.runningApplications(
+            withBundleIdentifier: Self.bundleIdentifier
+        )
+        .first {
+            $0.isFinishedLaunching && !$0.isTerminated && $0.processIdentifier > 0
+        }
+        .map {
+            GhosttyRunningApplication(
+                processIdentifier: $0.processIdentifier,
+                isFinishedLaunching: $0.isFinishedLaunching,
+                isTerminated: $0.isTerminated
+            )
+        }
+    }
+}
+
+public enum GhosttySignalResult: Equatable, Sendable {
+    case sent
+    /// The process exited after discovery and before signal delivery.
+    case notRunning
+    case failed(String)
+}
+
+public protocol GhosttyProcessSignaling: Sendable {
+    func sendSIGUSR2(to processIdentifier: Int32) -> GhosttySignalResult
+}
+
+public struct DarwinGhosttyProcessSignaler: GhosttyProcessSignaling {
+    public init() {}
+
+    public func sendSIGUSR2(to processIdentifier: Int32) -> GhosttySignalResult {
+        guard processIdentifier > 0 else {
+            return .failed("Ghostty 进程号无效")
+        }
+        let result = kill(processIdentifier, SIGUSR2)
+        guard result == 0 else {
+            let signalErrno = errno
+            if signalErrno == ESRCH {
+                return .notRunning
+            }
+            return .failed(String(cString: strerror(signalErrno)))
+        }
+        return .sent
+    }
+}
+
+public struct AppleScriptGhosttyReloader: GhosttyReloading {
+    public let scriptExecutor: any GhosttyAppleScriptExecuting
+    public let processQuery: any GhosttyProcessQuerying
+    public let processSignaler: any GhosttyProcessSignaling
+
+    public init(
+        scriptExecutor: any GhosttyAppleScriptExecuting = NSAppleScriptExecutor(),
+        processQuery: any GhosttyProcessQuerying = NSRunningApplicationGhosttyProcessQuery(),
+        processSignaler: any GhosttyProcessSignaling = DarwinGhosttyProcessSignaler()
+    ) {
+        self.scriptExecutor = scriptExecutor
+        self.processQuery = processQuery
+        self.processSignaler = processSignaler
+    }
 
     // `perform action` 是面向 terminal 的命令。即使 reload_config 最终会让整个
     // Ghostty 进程重读配置，也必须按 SDEF 传入一个 terminal 作为命令目标。
@@ -263,26 +378,44 @@ public struct AppleScriptGhosttyReloader: GhosttyReloading {
     }
 
     private func executeReloadScript() -> GhosttyReloadResult {
-        guard let appleScript = NSAppleScript(source: Self.reloadScriptSource) else {
-            return .pending("无法创建 Ghostty reload AppleScript")
+        switch scriptExecutor.execute(source: Self.reloadScriptSource) {
+        case let .failed(message):
+            // Automation refusal and other Apple Event failures are terminal
+            // for this attempt. Never send SIGUSR2 after an AppleScript error.
+            return .pending(message)
+        case let .returned(value):
+            return result(for: value)
         }
-        var errorInfo: NSDictionary?
-        let result = appleScript.executeAndReturnError(&errorInfo)
-        if let errorInfo {
-            let message = errorInfo[NSAppleScript.errorMessage] as? String
-            return .pending(message ?? "请在 Ghostty 中按 ⌘⇧, 重新载入配置")
-        }
-        switch result.stringValue {
+    }
+
+    private func result(for value: String?) -> GhosttyReloadResult {
+        switch value {
         case "reloaded":
             return .reloaded
         case "not-running":
             return .notRunning
         case "no-terminal":
-            // 没有终端窗口时，当前没有需要热重载的实例；下次打开窗口会直接
-            // 读取已切换的配置，因此不应该把这种状态报告为待处理错误。
-            return .noTerminal
+            return requestReloadWithoutTerminal()
         default:
             return .pending("Ghostty 拒绝执行 reload_config")
+        }
+    }
+
+    private func requestReloadWithoutTerminal() -> GhosttyReloadResult {
+        guard let application = processQuery.runningGhosttyApplication(),
+              application.isFinishedLaunching,
+              !application.isTerminated,
+              application.processIdentifier > 0
+        else {
+            return .notRunning
+        }
+        switch processSignaler.sendSIGUSR2(to: application.processIdentifier) {
+        case .sent:
+            return .reloadRequested
+        case .notRunning:
+            return .notRunning
+        case let .failed(message):
+            return .pending("无法请求 Ghostty 重载：\(message)")
         }
     }
 }
@@ -538,9 +671,6 @@ public struct GhosttyThemeAdapter: RestorableThemeAdapter {
         }
         try verifyDependencies(of: change)
         let receipt = try ThemeMutationExecutor(fileSystem: fileSystem).commit(change)
-        guard !change.mutations.isEmpty else {
-            return receipt.mergingMetadata(["reload": "notNeeded", "pendingReload": "false"])
-        }
         return receipt.mergingMetadata(reloader.reloadIfRunning().receiptMetadata)
     }
 
@@ -578,14 +708,10 @@ public struct GhosttyThemeAdapter: RestorableThemeAdapter {
         } catch {
             // 回滚器会尽力恢复其余文件后再报告冲突；即使部分失败，也要让 Ghostty
             // 重载已经安全恢复的 overlay。
-            if !receipt.committedMutations.isEmpty {
-                _ = reloader.reloadIfRunning()
-            }
+            _ = reloader.reloadIfRunning()
             throw error
         }
-        if !receipt.committedMutations.isEmpty {
-            _ = reloader.reloadIfRunning()
-        }
+        _ = reloader.reloadIfRunning()
     }
 
     public static let defaultLightConfigurationData = Data(defaultLightConfiguration.utf8)
